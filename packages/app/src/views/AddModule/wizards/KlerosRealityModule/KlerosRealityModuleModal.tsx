@@ -10,7 +10,8 @@ import {
   withStyles,
 } from '@material-ui/core'
 import debounce from 'lodash.debounce'
-import { InfuraProvider, parseUnits } from 'ethers'
+import { parseUnits } from 'ethers'
+import { getMainnetProvider, getSepoliaProvider } from 'services/rpc'
 import { NETWORK, NETWORKS } from 'utils/networks'
 import { getDefaultOracle, getKlerosAddress } from 'services'
 import { AddModuleModal } from '../components/AddModuleModal'
@@ -230,9 +231,9 @@ export const KlerosRealityModuleModal = ({ open, onClose, onSubmit }: RealityMod
   const classes = useStyles()
   const { sdk, safe, provider } = useSafeAppsSDKWithProvider()
   const { ensClient } = useEns()
-  // hack to resolve mainnet ENS
-  const mainnetProvider = useMemo(() => new InfuraProvider(NETWORK.MAINNET, import.meta.env.VITE_INFURA_ID), [])
-  const sepoliaProvider = useMemo(() => new InfuraProvider(NETWORK.SEPOLIA, import.meta.env.VITE_INFURA_ID), [])
+  // the Safe may be on any chain, but ENS lookups always target mainnet (sepolia in dev)
+  const mainnetProvider = useMemo(() => getMainnetProvider(), [])
+  const sepoliaProvider = useMemo(() => getSepoliaProvider(), [])
 
   const bondToken = NETWORKS[safe.chainId as NETWORK].nativeAsset
   const [params, setParams] = useState<RealityModuleParams>({
@@ -245,6 +246,7 @@ export const KlerosRealityModuleModal = ({ open, onClose, onSubmit }: RealityMod
   const [loadingEns, setLoadingEns] = useState<boolean>(false)
   const [loadedEns, setLoadedEns] = useState<boolean>(false)
   const [validEns, setValidEns] = useState<boolean>(false)
+  const [ensError, setEnsError] = useState<string>('')
   const [daorequirements, setDaorequirements] = useState<string>('')
 
   const [isController, setIsController] = useState<boolean>(false)
@@ -306,7 +308,11 @@ export const KlerosRealityModuleModal = ({ open, onClose, onSubmit }: RealityMod
         mainnetProvider,
         sepoliaProvider,
       )
-      setDaorequirements(daorequirements[0])
+      // `getEnsTextRecord` resolves to the record's string value. Indexing it with
+      // [0] kept only the first character, so the "missing DAO requirements" notice
+      // below could never fire: an unset record yielded `undefined`, which does not
+      // equal '' and therefore silently suppressed the warning.
+      setDaorequirements(daorequirements ?? '')
       setValidEns(snapshotSpace !== undefined)
       if (snapshotSpace !== undefined) {
         setIsSafesnapInstalled(!!snapshotSpace.plugins?.safeSnap)
@@ -334,14 +340,27 @@ export const KlerosRealityModuleModal = ({ open, onClose, onSubmit }: RealityMod
     setIsController(false)
     setIsSafesnapInstalled(false)
     setLoadedEns(false)
+    setEnsError('')
     if (params.snapshotEns && params.snapshotEns.includes('.eth')) {
       setLoadingEns(true)
+      setEnsError('')
       const validateInfo = async () => {
-        await validateEns()
-        setLoadingEns(false)
-        setLoadedEns(true)
+        try {
+          await validateEns()
+        } catch (error) {
+          // Surface the failure instead of spinning forever. Without this, any
+          // rejected RPC/Snapshot call leaves loadingEns stuck at true and the
+          // wizard becomes unusable with no indication of why.
+          console.error('ENS validation failed:', error)
+          setEnsError(
+            error instanceof Error ? error.message : 'Could not validate this ENS name.',
+          )
+        } finally {
+          setLoadingEns(false)
+          setLoadedEns(true)
+        }
       }
-      validateInfo()
+      void validateInfo()
     }
   }, 300)
 
@@ -541,7 +560,17 @@ export const KlerosRealityModuleModal = ({ open, onClose, onSubmit }: RealityMod
                 }
               />
               {!loadingEns && loadedEns && !validSnapshot && (
-                <PropStatus message='This Snapshot space does not exist.' status='error' />
+                // Distinguish "we looked and it isn't there" from "we could not look".
+                // Reporting a lookup failure as a missing space sends people hunting
+                // for a problem with their Snapshot space that does not exist.
+                <PropStatus
+                  message={
+                    ensError
+                      ? `Could not verify this ENS name: ${ensError}`
+                      : 'This Snapshot space does not exist.'
+                  }
+                  status='error'
+                />
               )}
             </Grid>
             <Grid item xs={6}>

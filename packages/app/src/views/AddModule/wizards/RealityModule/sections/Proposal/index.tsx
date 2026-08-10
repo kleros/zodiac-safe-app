@@ -29,7 +29,7 @@ import { NETWORK } from 'utils/networks'
 import useEns from 'hooks/useEns'
 import useDebouncedState from 'hooks/useDebouncedState'
 import { getAddressRecord } from '@ensdomains/ensjs/public'
-import { InfuraProvider } from 'ethers'
+import { getMainnetProvider, getSepoliaProvider } from 'services/rpc'
 
 const useStyles = makeStyles((theme) => ({
   container: {
@@ -131,9 +131,9 @@ export const ProposalSection: React.FC<SectionProps> = ({ handleNext, handleBack
   const [loading, setLoading] = useState<boolean>(false)
   const [ensIsValid, setEnsIsValid] = useState<boolean>(false)
   
-  // hack to resolve mainnet ENS
-  const mainnetProvider = useMemo(() => new InfuraProvider(NETWORK.MAINNET, import.meta.env.VITE_INFURA_ID), [])
-  const sepoliaProvider = useMemo(() => new InfuraProvider(NETWORK.SEPOLIA, import.meta.env.VITE_INFURA_ID), [])
+  // the Safe may be on any chain, but ENS lookups always target mainnet (sepolia in dev)
+  const mainnetProvider = useMemo(() => getMainnetProvider(), [])
+  const sepoliaProvider = useMemo(() => getSepoliaProvider(), [])
 
   useEffect(() => {
     if (provider && setupData && setupData.proposal) {
@@ -149,9 +149,15 @@ export const ProposalSection: React.FC<SectionProps> = ({ handleNext, handleBack
           setEnsIsValid(true)
           setLoading(true)
           const validateInfo = async () => {
-            await validEns()
+            try {
+              await validEns()
+            } finally {
+              // Without this, a rejected RPC/Snapshot call leaves `loading` true
+              // forever and the section hangs with a spinner and no explanation.
+              setLoading(false)
+            }
           }
-          validateInfo()
+          void validateInfo()
         } else {
           setEnsIsValid(false)
           setIsController(false)
@@ -159,7 +165,11 @@ export const ProposalSection: React.FC<SectionProps> = ({ handleNext, handleBack
         }
       }
     }
-    checkEns()
+    checkEns().catch((error) => {
+      console.error('ENS lookup failed:', error)
+      setEnsIsValid(false)
+      setLoading(false)
+    })
   }, [debouncedEnsName, ensClient, mainnetProvider, sepoliaProvider])
 
   const validEns = async () => {
